@@ -1,90 +1,116 @@
-# Hướng Dẫn Cấu Hình Gem `jwt` Trong Dự Án Rails
+# Hướng Dẫn congif Gem `jwt` với Gem Devise Trong Rails
 
-Hướng dẫn chi tiết từng bước để tích hợp và cấu hình gem `jwt` cho xác thực bằng JSON Web Token (JWT) trong ứng dụng Ruby on Rails.
+Hướng dẫn chi tiết từng bước để tích hợp và cấu hình gem `jwt` với gem `deivse` cho xác thực bằng JSON Web Token (JWT) trong ứng dụng Ruby on Rails.
 
-## 1. Thêm `jwt` vào Gemfile
-- Mở file `Gemfile`, thêm dòng sau để thêm gem `jwt` vào dự án:
+## 1. Thêm `jwt` và `devise` vào Gemfile
+- Mở file `Gemfile`, thêm dòng sau để thêm gem `jwt` và gem `devise` vào dự án:
 
   ```ruby
   gem 'jwt'
+  gem 'devíe'
 - Sau đó chạy lệnh
   ```ruby
   bundle install
 ## 2. Tạo File Khởi Tạo Cho JWT
-- Trong thư mục `config/initializers`, tạo một file mới có tên `jwt.rb` để lưu trữ khóa bí mật cho JWT:
+- Trong thư mục `config/initializers`, tạo một file mới có tên `jwt_strategy.rb` để lưu trữ khóa bí mật cho JWT:
   ```ruby
-  # config/initializers/jwt.rb
   
-  # Khóa bí mật dùng để mã hóa JWT. (Lưu ý: không lưu trữ khóa bí mật ở đây trong môi trường production, thay vào đó hãy dùng biến môi trường)
-  JWT_SECRET = ENV['JWT_SECRET'] || 'your_default_secret_key'
-## 3. Tạo Service Mã Hóa và Giải Mã JWT
-- Trong thư mục `lib`, tạo file `json_web_token.rb` với các phương thức mã hóa và giải mã JWT:
-  ```ruby
-  # lib/json_web_token.rb
+  module Devise
+    module Strategies
+      class JwtStrategy < Base
+        def valid?
+          request.headers["Authorization"].present?
+        end
   
-  require 'jwt'
+        def authenticate!
+          raise ExceptionHandler::AuthenticationError if no_payload_or_payload_user_id
   
-  class JsonWebToken
-    SECRET_KEY = JWT_SECRET
+          success! User.find_by(id: payload["user_id"], access_token: access_token)
+        end
   
-    # Phương thức để mã hóa JWT với payload và thời hạn
-    def self.encode(payload, exp = 24.hours.from_now)
-      payload[:exp] = exp.to_i
-      JWT.encode(payload, SECRET_KEY)
-    end
+        private
   
-    # Phương thức để giải mã JWT
-    def self.decode(token)
-      decoded = JWT.decode(token, SECRET_KEY)[0]
-      HashWithIndifferentAccess.new(decoded)
-    rescue JWT::DecodeError
-      nil
-    end
-  end
-
-- Lưu ý: Đảm bảo thư mục lib được tự động load trong Rails bằng cách thêm dòng sau vào file `config/application.rb` nếu cần:
-  ```ruby
-  config.autoload_paths << Rails.root.join('lib')
-## 4. Tạo Controller Đăng Nhập
-- Tạo một controller `AuthController` để xử lý đăng nhập và trả về JWT:
-  ```ruby
-  # app/controllers/auth_controller.rb
-
-  class AuthController < ApplicationController
-    def login
-      user = User.find_by(email: params[:email])
+        def access_token
+          bearer_token = request.headers.fetch("Authorization", "").split
+          return nil unless (bearer_token.first || "").casecmp("bearer").zero?
+          bearer_token.last
+        end
   
-      if user&.authenticate(params[:password])
-        token = JsonWebToken.encode(user_id: user.id)
-        render json: { token: token }, status: :ok
-      else
-        render json: { error: 'Invalid email or password' }, status: :unauthorized
+        def no_payload_or_payload_user_id
+          !payload || !payload.key?("user_id")
+        end
+  
+        def payload
+          JsonWebToken.decode(access_token)
+        rescue JWT::ExpiredSignature
+          raise ExceptionHandler::TokenTimeoutError
+        rescue StandardError
+          nil
+        end
       end
     end
   end
-## 5. Thêm Xác Thực Cho Các Controller Khác
-- Trong `ApplicationController`, thêm phương thức `authorize_request` để kiểm tra JWT cho các request cần xác thực:
+
+## 3. Tạo Service Mã Hóa và Giải Mã JWT
+  - Tạo folder `app/lib/json_web_token.rb`.
+    ```ruby
+      class JsonWebToken
+        HMAC_SECRET = ENV.fetch('SECRET_KEY_BASE', nil).freeze
+      
+        class << self
+          def encode(payload, exp = 30.minutes.from_now)
+            payload[:exp] = exp.to_i
+            ::JWT.encode(payload, HMAC_SECRET)
+          end
+      
+          def decode(token)
+            body = ::JWT.decode(token, HMAC_SECRET)[0]
+            ActiveSupport::HashWithIndifferentAccess.new body
+          end
+      
+          def valid?(payload)
+            Time.zone.at(payload['exp']) > Time.zone.now
+          end
+        end
+      end
+
+## 3. Config gem devise với jwt
+- Thêm đoạn config vào trong file `devise.rb`
   ```ruby
-  # app/controllers/application_controller.rb
-  
-  class ApplicationController < ActionController::API
-    before_action :authorize_request
-  
-    private
-  
-    def authorize_request
-      header = request.headers['Authorization']
-      header = header.split(' ').last if header
-      decoded = JsonWebToken.decode(header)
-      @current_user = User.find(decoded[:user_id]) if decoded
-    rescue ActiveRecord::RecordNotFound, JWT::DecodeError
-      render json: { errors: 'Unauthorized' }, status: :unauthorized
+    config.warden do |manager|
+      manager.strategies.add(:jwt, Devise::Strategies::JwtStrategy)
+      manager.default_strategies(scope: :user).unshift :jwt
     end
-  end
-## 6. Bảo Mật Khóa Bí Mật JWT Bằng Biến Môi Trường
-- Để bảo mật, hãy lưu khóa bí mật JWT trong biến môi trường thay vì viết trực tiếp vào mã nguồn, đặc biệt là trong môi trường production. Thêm biến `JWT_SECRET` vào file `.env`:
-  ```ruby
-  JWT_SECRET=your_production_secret_key
+## 4. Tạo chức năng login dùng devise với jwt trong  `SessionsController`
+  - Có thể sử dụng file `SessionsController` khi cài `gem devise` để tạo chức năng login `app/controllers/users/sessions_controller.rb`
+    ```ruby
+      module Users
+      class SessionsController < Devise::SessionsController
+        before_action :configure_permitted_parameters
+    
+        respond_to :json
+    
+        def create
+          resource = warden.authenticate!(auth_options.merge(store: false, recall: "#{controller_path}#failure"))
+          access_token = JsonWebToken.encode(user_id: resource.id)
+          render json: {
+            access_token: access_token
+          }, status: :ok
+        end
+    
+        def failure
+          render json: { error: 'email_password_invalid' }, status: :unauthorized
+        end
+    
+        private
+    
+        def configure_permitted_parameters
+          devise_parameter_sanitizer.permit(:sign_in) { |u| u.permit(:email, :password) }
+        end
+      end
+    end
+## Kết.
+- Với các bước trên ta đã config và chạy chức login bằng phương pháp thiết lập xác thực dựa trên token trong ứng dụng Rail thông qua gem jwt và gem devise
 
 
 
